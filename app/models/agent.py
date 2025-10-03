@@ -21,3 +21,5 @@ class AgentConfig(BaseModel):
     time: Optional[str] = None
     output_method: Optional[str] = None
     published: bool = False
+    is_active: bool = True 
+

@@ -25,7 +25,7 @@ def get_schema_and_sample_data():
 
     structured_schema = {}
     for table, column in rows:
-        structured_schema.setdefault(table, []).append(column)
+        structured_schema.setdefault(table.upper(), []).append(column)
 
     # Flattened schema format: table(col1, col2) - for GPT use
     schema_text_lines = []
@@ -66,7 +66,7 @@ def get_db_schema():
 
     schema = {}
     for table, column in rows:
-        schema.setdefault(table, []).append(column)
+        schema.setdefault(table.upper(), []).append(column)
 
     conn.close()
 

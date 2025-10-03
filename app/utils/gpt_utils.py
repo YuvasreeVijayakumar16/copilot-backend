@@ -3,16 +3,29 @@ import os
 from openai import OpenAI, OpenAIError
 import json
 import asyncio
+import logging
+
+logger = logging.getLogger("app.utils.gpt_utils")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def generate_sql_query(question, schema, system_prompt=None):
+    logger.info("generate_sql_query: start", extra={
+        "question_len": len(question or ""),
+        "schema_keys": list(schema.keys()) if isinstance(schema, dict) else None
+    })
     default_prompt = (
         "You are a helpful assistant that generates optimized SQL Server queries. "
         "Based on the schema and user's question, return only a valid SQL SELECT statement. "
         "Do not add explanations or markdown. Use table and column names exactly as given in the schema."
     )
-    return generate_sql_with_openai(question, schema, system_prompt or default_prompt)
+    try:
+        sql = generate_sql_with_openai(question, schema, system_prompt or default_prompt)
+        logger.info("generate_sql_query: success", extra={"sql_len": len(sql or "")})
+        return sql
+    except Exception as e:
+        logger.exception("generate_sql_query: error")
+        raise
 
 async def  is_question_relevant_to_purpose(question: str, purpose: str) -> bool:
     prompt = (
@@ -32,9 +45,10 @@ async def  is_question_relevant_to_purpose(question: str, purpose: str) -> bool:
             temperature=0
         )
         answer = response.choices[0].message.content.strip().lower()
+        logger.info("relevance_check: success", extra={"answer": answer})
         return "yes" in answer
     except Exception as e:
-        print(f"[Error checking relevance] {e}")
+        logger.exception("relevance_check: error")
         return True  # Assume yes if API fails
 
 

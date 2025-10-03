@@ -18,7 +18,57 @@ from app.services.agent_servies import (
     load_agent_config
 )
 from app.services.agent_servies import handle_agent_request
+import logging
+import math
+import numpy as np
+
+logger = logging.getLogger("app.routes.agent_routes")
+from app.agents.autogen_orchestrator import run_autogen_orchestration
+from app.agents.autogen_manager import AgentManager
 router = APIRouter()
+
+
+def sanitize_for_json(obj):
+    """Recursively sanitize a Python object for JSON encoding.
+
+    Replaces non-finite floats (inf, -inf, nan) with None and converts
+    numpy scalars/arrays to native Python types.
+    """
+    # primitives
+    if obj is None:
+        return None
+    if isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        return None if not math.isfinite(obj) else obj
+
+    # numpy scalar
+    if isinstance(obj, (np.generic,)):
+        try:
+            return sanitize_for_json(obj.item())
+        except Exception:
+            return None
+
+    # list/tuple
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_for_json(v) for v in obj]
+
+    # dict
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+
+    # pandas objects or objects exposing tolist
+    try:
+        if hasattr(obj, "tolist"):
+            return sanitize_for_json(obj.tolist())
+    except Exception:
+        pass
+
+    # fallback to string representation
+    try:
+        return str(obj)
+    except Exception:
+        return None
 
 
 
@@ -30,10 +80,22 @@ user_collected_fields = {}
 async def agent_message(request: Request):
     try:
         data = await request.json()
+        logger.info("agent_message: received", extra={
+            "has_user_id": bool(data.get("user_id")),
+            "message_len": len((data.get("message") or ""))
+        })
+        # AutoGen short-circuit
+        if str(data.get("engine", "")).lower() == "autogen":
+            question = data.get("message", "")
+            output_format = data.get("output_format")
+            logger.info("agent_message: using AutoGen orchestration", extra={"output_format": output_format})
+            result = run_autogen_orchestration(question, output_format=output_format)
+            return JSONResponse(sanitize_for_json(result))
         user_id = data.get("user_id")
         message = data.get("message", "")
 
         if not user_id or not message:
+            logger.warning("agent_message: missing user_id or message")
             return JSONResponse({"error": "Missing user_id or message"}, status_code=400)
 
         # Init user thread
@@ -58,6 +120,7 @@ async def agent_message(request: Request):
           #  return JSONResponse({"message": "What is the agent's role?"})
         if not collected["name"]:
             collected["name"] = message
+            logger.info("agent_message: asking for role options")
             return JSONResponse({
              "message": "Choose role",
             "Roles": VALID_ROLES
@@ -66,12 +129,14 @@ async def agent_message(request: Request):
         # If not, return an error message with valid options
         elif not collected["role"]:
             if message not in VALID_ROLES:
+                logger.warning("agent_message: invalid role", extra={"role": message})
                 return JSONResponse({
                     "error": f"Invalid role: '{message}'. Please provide a valid role from the following options: {', '.join(VALID_ROLES)}",
                     "allowed_roles": VALID_ROLES
                 }, status_code=400)
             
             collected["role"] = message
+            logger.info("agent_message: role accepted; asking purpose")
             return JSONResponse({"message": "What is the purpose of this agent?"})
 
         # === PURPOSE VALIDATION MOVED HERE ===
@@ -88,6 +153,7 @@ async def agent_message(request: Request):
             )
             
             if not validation.get("purpose_valid", False):
+                logger.info("agent_message: invalid purpose provided")
                 # Only reset the purpose field, so the user can re-enter it.
                 collected["purpose"] = None
                 return JSONResponse({
@@ -96,11 +162,13 @@ async def agent_message(request: Request):
 
             # If validation passes, save the purpose and ask for the next field.
             collected["purpose"] = message
+            logger.info("agent_message: purpose accepted; asking instructions")
             return JSONResponse({"message": "What are the detailed instructions for the agent?"})
 
         # ✅ 4. Get Agent Instructions
         elif not collected["instructions"]:
             collected["instructions"] = message
+            logger.info("agent_message: asking capabilities")
             return JSONResponse({
         "message": "List the agent's capabilities (comma-separated).",
         "allowed_capabilities": ALLOWED_CAPABILITIES
@@ -131,11 +199,13 @@ async def agent_message(request: Request):
     # Handle other unexpected data types
     # 👇 NEW/CHANGED LINE
             else:
+                logger.warning("agent_message: invalid capabilities type", extra={"type": type(message).__name__})
                 return JSONResponse({"error": "Invalid data type for capabilities."}, status_code=400)
     
     # Check if every user-provided capability is in the allowed list
             for capability in user_capabilities:
                     if capability not in ALLOWED_CAPABILITIES:
+                        logger.warning("agent_message: invalid capability", extra={"capability": capability})
                         return JSONResponse({
                 "error": f"Invalid capability: '{capability}'. Please provide a valid capability from the following options: {', '.join(ALLOWED_CAPABILITIES)}",
                 "allowed_capabilities": ALLOWED_CAPABILITIES
@@ -143,6 +213,7 @@ async def agent_message(request: Request):
     
     # If all capabilities are valid, assign them and proceed
             collected["capabilities"] = user_capabilities
+            logger.info("agent_message: capabilities accepted; asking welcome message")
             return JSONResponse({"message": "What welcome message should the agent greet users with?"})
 
 # ✅ Welcome Message Validation
@@ -156,6 +227,7 @@ async def agent_message(request: Request):
             )
 
         if validation.get("invalid_instructions"):
+                logger.info("agent_message: invalid instructions")
                 # Clear invalid instructions and dependents.
                 collected["instructions"] = None
                 collected["capabilities"] = None
@@ -210,6 +282,7 @@ async def agent_message(request: Request):
                     "Published": agent_model.published
                 }
 
+                logger.info("agent_message: syncing agent to external API")
                 api_response = requests.post(api_url, json=payload)
 
                 try:
@@ -234,9 +307,7 @@ async def agent_message(request: Request):
             # ✅ Reset after success
         user_threads[user_id] = []
         user_collected_fields[user_id] = {}
-
-        print("API Status Code:", api_response.status_code)
-        print("API Response:", api_response.text)
+        logger.info("agent_message: agent created", extra={"status": api_response.status_code})
 
         return JSONResponse(content=jsonable_encoder({
                 "message": "Agent created and validated successfully!",
@@ -246,7 +317,7 @@ async def agent_message(request: Request):
             }))
 
     except Exception as e:
-        traceback.print_exc()
+        logger.exception("agent_message: exception")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -254,7 +325,7 @@ async def agent_message(request: Request):
 async def edit_agent(request: Request):
     try:
         data = await request.json()
-        print("Received data:", data)
+        logger.info("edit_agent: received", extra={"keys": list(data.keys())})
 
         # Extract existing_name and new_data from incoming request
         existing_name = data.get("ExistingAgentName")
@@ -283,6 +354,7 @@ async def edit_agent(request: Request):
         }, status_code=200)
 
     except Exception as e:
+        logger.exception("edit_agent: exception")
         return JSONResponse(content={
             "message": "❌ Exception occurred while editing agent.",
             "details": str(e)
@@ -298,10 +370,12 @@ async def publish_existing_agent(request: Request):
         if not agent_name:
             return JSONResponse({"error": "Missing 'name' in request body"}, status_code=400)
 
+        logger.info("publish_existing_agent: publishing", extra={"agent_name": agent_name})
         result = publish_agent(agent_name)  # ✅ Pass only the name
         return JSONResponse(result)
 
     except Exception as e:
+        logger.exception("publish_existing_agent: exception")
         return JSONResponse(
             {"error": f"❌ Exception occurred while publishing agent: {str(e)}"},
             status_code=500
@@ -312,37 +386,22 @@ async def test_existing_agent(request: Request):
     data = await request.json()
     name = data.get("name")
     question = data.get("question")
-    created_by = data.get("created_by", "test_user@example.com")
-    encrypted_filename = data.get("encrypted_filename", f"{name}_test_output")
-    formatdata = data.get("formatdata", {})
-
-    agent_config = load_agent_config(name)
-    if not agent_config:
-        return JSONResponse({"error": "Agent not found"}, status_code=404)
-
-    # Load schema and sample data
-    structured_schema, _, sample_data = get_schema_and_sample_data()
-
-    # Use file generator only if ppt/excel/doc is mentioned in question
-    question_lower = question.lower() if question else ""
-    if any(word in question_lower for word in ["ppt", "presentation", "pptx", "excel", "xlsx", "word", "docx"]):
-        # ✅ Merge all required params into a single data dictionary
-        payload = {
-            "agent_config": agent_config.dict(),
-            "question": question,
-            "structured_schema": structured_schema,
-            "sample_data": sample_data,
-            "encrypted_filename": encrypted_filename,
-            "created_by": created_by,
-            "formatdata": formatdata
-        }
-
-        result = await handle_agent_request(payload)
-    else:
-        # Only test for insights and recommendations
-        result = await test_agent_response(agent_config.dict(), structured_schema, sample_data, question)
-
-    return JSONResponse(serialize(result))
+    created_by = data.get("created_by")
+    encrypted_filename = data.get("encrypted_filename")
+    # Auto-select agent if not provided
+    if not name:
+        mgr = AgentManager()
+        agents = mgr.discover_all_agents()
+        chosen = mgr.route(question or "", agents)
+        name = chosen.get("name") if isinstance(chosen, dict) else None
+    logger.info("test_existing_agent: using AutoGen orchestration", extra={"agent_name": name})
+    result = run_autogen_orchestration(
+        question,
+        agent_name=name,
+        created_by=created_by,
+        encrypted_filename=encrypted_filename,
+    )
+    return JSONResponse(sanitize_for_json(result))
 
 
 
@@ -354,6 +413,7 @@ async def play_agent(name: str, request: Request):
     try:
         data = await request.json()
     except Exception:
+        logger.warning("play_agent: invalid JSON body")
         return JSONResponse({"error": "Invalid or missing JSON body"}, status_code=400)
 
     user_id = data.get("user_id")
@@ -376,27 +436,15 @@ async def play_agent(name: str, request: Request):
     # Append user message
     user_threads[user_id].append({"user": message})
 
-    # Prepare data for handle_agent_request
-    structured_schema, _, sample_data = get_schema_and_sample_data()
+    # Use official AutoGen orchestration for chat
+    logger.info("play_agent: invoking AutoGen orchestration", extra={"agent_name": name, "user_id": user_id})
+    result = run_autogen_orchestration(message, agent_name=name)
 
-    payload = {
-        "agent_config": agent_config.dict(),
-        "question": message,
-        "structured_schema": structured_schema,
-        "sample_data": sample_data,
-        "encrypted_filename": f"{user_id}_{name}_chat",
-        "created_by": user_id,
-        "formatdata": {}
-    }
+    agent_reply = result.get("answer") or "Sorry, no response generated."
+    user_threads[user_id].append({"agent": agent_reply})
 
-    result = await handle_agent_request(payload)
-
-    if "agent_response" in result:
-        user_threads[user_id].append({"agent": result["agent_response"]})
-    else:
-        user_threads[user_id].append({"agent": "Sorry, no response generated."})
-
-    return JSONResponse(result)
+    logger.info("play_agent: response ready", extra={"has_agent_response": bool(result.get("answer"))})
+    return JSONResponse(sanitize_for_json(result))
 
 
 @router.post("/reset-conversation")
@@ -414,10 +462,131 @@ async def reset_conversation(request: Request):
         if user_id in user_collected_fields:
             del user_collected_fields[user_id]
             
+        logger.info("reset_conversation: reset", extra={"user_id": user_id})
         return JSONResponse({"message": "Conversation has been reset."}, status_code=200)
 
     except Exception as e:
-        traceback.print_exc()
+        logger.exception("reset_conversation: exception")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.post("/agent/autogen")
+async def autogen_orchestrate(request: Request):
+    data = await request.json()
+    question = data.get("question", "")
+    logger.info("autogen_orchestrate: received", extra={"qlen": len(question)})
+    result = run_autogen_orchestration(question)
+    return JSONResponse(sanitize_for_json(result))
+
+
+@router.post("/agent/manager/plan_run")
+async def plan_and_run_manager(request: Request):
+    data = await request.json()
+    task = data.get("task", "").strip()
+    agents = data.get("agents")  # optional now
+    created_by = data.get("created_by")
+    encrypted_filename = data.get("encrypted_filename")
+    if not task:
+        return JSONResponse({"error": "Missing 'task'"}, status_code=400)
+    logger.info("plan_and_run_manager: received", extra={"task_len": len(task), "agents": (len(agents) if isinstance(agents, list) else 0)})
+    mgr = AgentManager()
+    # Execute and, if a single agent is chosen in steps, pass upload metadata through
+    result = mgr.plan_and_run(task, agents)
+    # Best-effort propagate upload after the fact is complex; rely on orchestration handling per step.
+    return JSONResponse(sanitize_for_json(result))
+
+# agent_routes.py (New endpoints)
+@router.post("/agent/orchestrate")
+async def orchestrate_agents(request: Request):
+    """Execute multi-agent workflow for a task"""
+    data = await request.json()
+    task = data.get("task")
+    session_id = data.get("session_id", str(uuid4()))
+
+    if not task:
+        return JSONResponse({"error": "Task is required"}, status_code=400)
+
+    # Optional metadata to trigger automatic upload from orchestrator
+    output_format = data.get("output_format")
+    created_by = data.get("created_by")
+    encrypted_filename = data.get("encrypted_filename")
+
+    # Initialize agent manager
+    manager = AgentManager()
+
+    # Build initial context forwarded into agents/orchestrator
+    ctx = {}
+    if output_format:
+        ctx["output_format"] = output_format
+    if created_by:
+        ctx["created_by"] = created_by
+    if encrypted_filename:
+        ctx["encrypted_filename"] = encrypted_filename
+
+    # Plan and execute workflow, passing initial context
+    result = manager.plan_and_run(task, ctx)
+    safe_result = sanitize_for_json(result)
+
+    # Extract agents used from the steps
+    agents_used = []
+    steps = safe_result.get("steps", [])
+    for step in steps:
+        agent_name = step.get("agent")
+        if agent_name and agent_name not in agents_used:
+            agents_used.append(agent_name)
+
+    return JSONResponse({
+        "session_id": session_id,
+        "task": task,
+        "agents_used": agents_used,
+        "result": safe_result
+    })
+
+@router.post("/agent/chat")
+async def multi_agent_chat(request: Request):
+    """Continue conversation with multi-agent context"""
+    data = await request.json()
+    message = data.get("message")
+    session_id = data.get("session_id")
+    
+    if not message or not session_id:
+        return JSONResponse({"error": "Message and session_id are required"}, status_code=400)
+    
+    # Initialize agent manager
+    manager = AgentManager()
+    
+    # Get previous context
+    context = manager.context_history.get(session_id, {})
+    
+    # Route message to appropriate agent
+    agents = manager.discover_agents()
+    agent = manager.route_task(message, agents)
+    
+    # Execute with context
+    result = run_autogen_orchestration(
+        question=message,
+        agent_name=agent.get("name"),
+        context=context
+    )
+    
+    # Update context
+    if result.get("answer"):
+        context["last_response"] = result["answer"]
+        manager.context_history[session_id] = context
+    
+    return JSONResponse({
+        "session_id": session_id,
+        "agent": agent.get("name"),
+        "role": agent.get("role"),
+        "response": sanitize_for_json(result)
+    })
+
+@router.get("/agent/context/{session_id}")
+async def get_session_context(session_id: str):
+    """Get conversation context for a session"""
+    manager = AgentManager()
+    context = manager.context_history.get(session_id, {})
+    return JSONResponse({
+        "session_id": session_id,
+        "context": context
+    })
