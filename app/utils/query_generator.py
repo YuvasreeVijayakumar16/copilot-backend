@@ -19,6 +19,8 @@ Write an SQL Server SELECT query to answer the question based on the schema.
 Return only the SQL query without explanation or markdown.
 """
 
+
+
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[

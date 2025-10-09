@@ -1,7 +1,10 @@
 # app/utils/schema_reader.py
 
 import pandas as pd
+import warnings
 from app.db.sql_connection import get_db_connection
+
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable*", category=UserWarning)
 
 
 def get_schema_and_sample_data():

@@ -4,134 +4,19 @@ import time
 import requests
 import json as _json
 from typing import List, Dict, Any, Optional, Callable
-from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from openai import OpenAI
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
+
 from app.services.agent_servies import load_agent_config, GET_ALL_AGENTS_URL
-from app.agents.autogen_orchestrator import run_autogen_orchestration
+from app.agents.agent_conversation import AgentNode, MessageBus, _client
+from app.utils.schema_reader import get_schema_and_sample_data
+from app.db.sql_connection import execute_sql_query
+from app.utils.ppt_generator import generate_direct_response
+import pandas as pd
 
-logger = logging.getLogger("app.agents.autogen_manager")
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-@dataclass
-class AgentNode:
-    """A lightweight agent abstraction implementing modularity and encapsulation.
-
-    MAS principles implemented here:
-    - Modularity & Encapsulation: this dataclass bundles agent metadata and exposes
-      a single `execute(...)` method as the public interface.
-    - Autonomy: agent-local `execute` performs authentication/health and runs tasks
-      independently (keeps decision & execution logic inside the agent boundary).
-    - Security hook: `authenticate` is a placeholder to implement token/cert checks.
-    - Environment Awareness: `execute` accepts a limited `context` preview to allow
-      agents to perceive local context without exposing full system state.
-    """
-
-    name: str
-    purpose: str = ""
-    config: Dict[str, Any] = field(default_factory=dict)
-
-    def authenticate(self) -> bool:
-        """Placeholder for agent authentication / trust checks.
-
-        Real deployments should validate agent-supplied tokens or mutual-TLS certs.
-        """
-        token = self.config.get("auth_token")
-        if token:
-            # Simple placeholder: accept non-empty token. Replace with real verification.
-            # (Security & Privacy hook)
-            return True
-        # If no token required, treat as public agent
-        return True
-
-    def health_check(self) -> bool:
-        """Lightweight health probe for an agent (can be extended).
-
-        Returns True if agent is reachable / healthy.
-        """
-        # If the config contains an endpoint, we could ping it. For now assume healthy.
-        # (Robustness & Fault Tolerance hook)
-        return True
-
-    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Execute the task using orchestration. Keeps agent autonomy by scoping behavior here.
-
-        Returns a result dict with at minimum 'answer' or 'error'.
-        """
-        # Security: ensure the agent is allowed to run tasks
-        if not self.authenticate():
-            return {"error": "authentication_failed"}
-
-        full_task = task
-        if context:
-            # Environment Awareness: provide a limited, sanitized preview of context
-            # to the agent to keep data minimization and privacy.
-            ctx_preview = {k: str(v)[:200] for k, v in context.items()}
-            full_task = f"{task}\n\nContext:\n{ctx_preview}"
-
-        # Call the orchestration (existing system) while keeping this wrapper responsible
-        try:
-            # Extract optional overrides from workflow context
-            output_format = None
-            created_by = None
-            encrypted_filename = None
-            if context and isinstance(context, dict):
-                output_format = context.get("output_format")
-                created_by = context.get("created_by")
-                encrypted_filename = context.get("encrypted_filename")
-
-            logger.info("AgentNode: invoking orchestrator", extra={"agent": self.name, "output_format": output_format, "created_by": created_by})
-            res = run_autogen_orchestration(
-                full_task,
-                agent_name=self.name,
-                output_format=output_format,
-                created_by=created_by,
-                encrypted_filename=encrypted_filename,
-            )
-            return res or {}
-        except Exception as e:
-            logger.exception("Agent execution failed", extra={"agent": self.name, "error": str(e)})
-            return {"error": str(e)}
-
-
-class MessageBus:
-    """Simple in-process publish-subscribe bus for agent coordination.
-
-    This satisfies a minimal communication protocol inside the process and can be
-    replaced with Redis/JetStream/etc for distributed deployments.
-    """
-    # Communication Protocols:
-    # - Implements a small, topic-based pub/sub for agents and components to
-    #   decouple coordination and notifications.
-    # - This is intentionally simple and pluggable so it can be replaced by a
-    #   production-grade broker for scalability and durability.
-    def __init__(self):
-        self._subs: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
-
-    def subscribe(self, topic: str, callback: Callable[[Dict[str, Any]], None]):
-        self._subs.setdefault(topic, []).append(callback)
-
-    def publish(self, topic: str, message: Dict[str, Any]):
-        for cb in list(self._subs.get(topic, [])):
-            try:
-                cb(message)
-            except Exception:
-                logger.exception("Message handler failed", extra={"topic": topic})
-
+logger = logging.getLogger(__name__)
 
 class AgentManager:
-    """Manages discovery, routing, and execution of agents with MAS design principles.
-
-    Key features added and mappings to MAS principles:
-    - AgentNode abstraction (Modularity & Encapsulation, Autonomy)
-    - MessageBus for in-memory communication (Communication Protocols, Coordination)
-    - Retries/backoff and health hooks (Robustness & Fault Tolerance)
-    - ThreadPoolExecutor + caching (Scalability)
-    - plan_from_task uses LLMs (Adaptability & Goal-Oriented Behavior)
-    - Authentication hook in AgentNode (Security & Privacy)
-    """
-
     SIMPLE_TASK_KEYWORDS = ["simple", "quick", "basic", "single", "only"]
     _agents_cache: Optional[List[AgentNode]] = None
     _agents_cache_time: Optional[float] = None
@@ -185,9 +70,20 @@ class AgentManager:
             return self._agents_cache
 
         try:
-            logger.info(f"Attempting to fetch all agents from API: {GET_ALL_AGENTS_URL}")
-            resp = requests.get(GET_ALL_AGENTS_URL, timeout=20)
-            resp.raise_for_status()
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Attempting to fetch all agents from API: {GET_ALL_AGENTS_URL} (attempt {attempt + 1}/{max_retries})")
+                    resp = requests.get(GET_ALL_AGENTS_URL, timeout=30)
+                    resp.raise_for_status()
+                    break  # Success, exit retry loop
+                except requests.exceptions.Timeout:
+                    if attempt < max_retries - 1:
+                        sleep_time = 5 * (attempt + 1)
+                        logger.warning(f"Timeout fetching agents, retrying in {sleep_time} seconds", extra={"attempt": attempt + 1})
+                        time.sleep(sleep_time)
+                    else:
+                        raise  # Re-raise after last attempt
 
             table = resp.json().get("Table", [])
             if not table:
@@ -289,6 +185,7 @@ class AgentManager:
 
     def _combine_results_with_llm(self, task: str, steps: List[Dict[str, Any]]) -> str:
         """Use LLM to combine and summarize results from all agent steps."""
+
         if not steps:
             return "No results to combine."
 
@@ -302,7 +199,22 @@ class AgentManager:
                 summary = f"Step {i} ({agent}): Failed - {result['error']}"
             else:
                 answer = result.get("answer", "No answer")
-                summary = f"Step {i} ({agent}): {answer[:500]}..."  # Truncate for brevity
+                preview_rows = result.get("preview_rows", [])
+                file_path = result.get("file_path", None) 
+                file_type = result.get("file_type", None)
+                upload_status = result.get("file_type", None)
+
+                preview_str = ""
+                if preview_rows:
+                    preview_str = "Preview Rows:\n" + "\n".join([f"x:{idx+1} {', '.join([f'{k}:{v}' for k,v in row.items()])}" for idx, row in enumerate(preview_rows)])
+
+                file_info = ""
+                if file_path and file_type:
+                    file_info = f"File generated: {file_path} (type: {file_type})\n"
+                if upload_status:
+                    file_info += f"Upload status: {upload_status}\n"
+
+                summary = f"Step {i} ({agent}): {answer[:500]}...\n{preview_str}{file_info}"
             step_summaries.append(summary)
 
         steps_text = "\n".join(step_summaries)
@@ -436,17 +348,82 @@ class AgentManager:
             logger.error("Failed to generate plan from task", exc_info=True, extra={"error": str(e), "task": task})
             return default
 
+    def _fetch_data_for_task(self, task: str) -> pd.DataFrame:
+        """Fetch relevant data for the task using SQL query generation."""
+        try:
+            structured_schema, schema_text, sample_data = get_schema_and_sample_data()
+            logger.info("Available tables", extra={"tables": list(structured_schema.keys())})
+            if not structured_schema:
+                logger.warning("No schema available for data fetching")
+                return pd.DataFrame()
+
+            # Use LLM to generate SQL query based on task
+            prompt = (
+                f"Generate a SQL query to fetch all data from the most relevant table for the task: '{task}'\n\n"
+                f"Database schema (table(columns)):\n{schema_text}\n\n"
+                "Important: Use the exact table and column names from the schema. Use SELECT TOP 100 * FROM table_name to fetch all columns. Return only the SQL query, no explanations or markdown."
+            )
+            resp = _client.chat.completions.create(
+                model=os.getenv("AUTOGEN_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+            )
+            sql_query = (resp.choices[0].message.content or "").strip()
+            # Clean up the query
+            sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+            logger.info("Generated SQL query", extra={"query": sql_query})
+
+            if not sql_query:
+                return pd.DataFrame()
+
+            # Execute the query
+            result = execute_sql_query(sql_query)
+            if isinstance(result, dict) and "error" in result:
+                logger.error("SQL query failed", extra={"error": result["error"]})
+                return pd.DataFrame()
+
+            df = pd.DataFrame(result)
+            if df.empty:
+                logger.warning("Query returned no data")
+                return pd.DataFrame()
+
+            df_clean = df.replace([pd.NA, float('inf'), -float('inf')], pd.NA).fillna("null")
+            logger.info("Fetched data", extra={"rows": len(df_clean), "columns": list(df_clean.columns)})
+            return df_clean
+
+        except Exception as e:
+            logger.exception("Failed to fetch data for task")
+            return pd.DataFrame()
+
+    def _create_sample_data(self) -> pd.DataFrame:
+        """Create sample inventory data for demonstration."""
+        data = {
+            "Material": ["Steel", "Aluminum", "Copper", "Plastic", "Glass", "Wood", "Rubber", "Fabric"],
+            "Current_Stock": [150, 200, 80, 300, 120, 90, 250, 180],
+            "Reorder_Point": [100, 150, 50, 200, 80, 60, 150, 120],
+            "Fill_Rate": [0.95, 0.88, 0.92, 0.97, 0.85, 0.90, 0.93, 0.89],
+            "Turnover_Rate": [4.2, 3.8, 5.1, 2.9, 3.5, 4.0, 3.2, 3.7]
+        }
+        df = pd.DataFrame(data)
+        df["Understock"] = df["Current_Stock"] < df["Reorder_Point"]
+        logger.info("Created sample data", extra={"rows": len(df)})
+        return df
+
     def plan_and_run(self, task: str, candidate_agents: Optional[List[str]] = None) -> Dict[str, Any]:
         plan = self.plan_from_task(task)
         logger.info("Plan from GPT", extra={"plan": plan})
+
+        # Fetch data for the task
+        df_clean = self._fetch_data_for_task(task)
+
         # Allow callers to pass an initial context via the candidate_agents slot
         # if they provided a dict there (backwards-compatible: most callers
         # pass a list or None). If candidate_agents is a dict, treat it as
         # context. Otherwise interpret as agent whitelist.
-        context = None
+        context = {"df_clean": df_clean}
         agents_param = candidate_agents
         if isinstance(candidate_agents, dict):
-            context = candidate_agents
+            context.update(candidate_agents)
             agents_param = None
 
         result = self.run_workflow(plan, agents_param, context)

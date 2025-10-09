@@ -1,0 +1,19 @@
+[33m3f1d26a[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Updated changes  with Agent manager ver1.0
+[33m609904c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m Updated changes after demo with publish
+[33m38c9ee8[m Updated changes after demo with capabilities new
+[33m1dfd485[m Updated changes after demo with capabilities
+[33ma0b9c4b[m Updated changes after demo
+[33mc3f6224[m Updated to  get in main
+[33m843e51e[m Updated to  get
+[33m5873b19[m reset agent
+[33m7f685d5[m error handling in agent create
+[33m845141a[m Add /agent/play endpoint to enable chat with published agents
+[33m8a0e3c8[m Dockerfile finalfi
+[33m3c3155c[m Dockerfile changes -new
+[33m1fa60d7[m Dockerfile changes -image
+[33m92ba55c[m Describe your changes here
+[33mb178b8c[m Remove .gitignore from repository
+[33m57cdda5[m Remove secrets from repository
+[33m4c7538b[m Cleaned render.yaml to remove secret
+[33md10b685[m Initial project setup with backend code and Dockerfile
+[33m8deb6fa[m Add .gitignore to exclude environment and temp files

@@ -2,8 +2,11 @@
 
 import pyodbc
 import pandas as pd
+import warnings
 import os
 from dotenv import load_dotenv
+
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable*", category=UserWarning)
 
 load_dotenv()  # Load values from .env file if present
 

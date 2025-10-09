@@ -4,6 +4,8 @@ import os
 import json
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime
 from collections import defaultdict
 import logging
@@ -23,6 +25,8 @@ from app.models.agent import AgentConfig
 logger = logging.getLogger("app.services.agent_servies")
 MAX_ROWS = 1000
 REQUEST_TIMEOUT = 20
+
+
 MAX_QUESTION_LENGTH = 5000
 API_ROOT = "https://supplysenseaiapi-aadngxggarc0g6hz.z01.azurefd.net/api/iSCM/"
 GET_ALL_AGENTS_URL = f"{API_ROOT}GetAgentdetails"
@@ -440,26 +444,25 @@ async def handle_agent_request(data : dict):
                 mimetype = mime_map.get(output_format, "application/octet-stream")
 
                 with open(output_path, "rb") as f:
-                    files = {"file": (filename_with_ext, f, mimetype)}
-                    
+                    files = {"File": (filename_with_ext, f, mimetype)}
+
                     data_fields = {
+                        "FileName": encrypted_filename,
+                        "CreatedBy": created_by,
                         "content": json.dumps({"content": [filtered_obj]}),
                     }
 
                     upload_url = f"{api_root}UpdatePptFileV2"
-                    # FIX 2: Explicitly pass FileName and CreatedBy as URL parameters using 'params'
-                    upload_params = {"FileName": encrypted_filename, "CreatedBy": created_by}
-                    
-                    logger.info("handle_agent_request: uploading file", extra={"url": upload_url, "params": upload_params, "filename": filename_with_ext})
-                    
-                    # Using 'params' argument for URL query string
+
+                    logger.info("handle_agent_request: uploading file", extra={"url": upload_url, "data_fields": data_fields, "filename": filename_with_ext})
+
                     upload_response = requests.post(
-                        upload_url, 
-                        data=data_fields, 
-                        files=files, 
-                        params=upload_params, # <-- FIX applied here
+                        upload_url,
+                        data=data_fields,
+                        files=files,
                         timeout=60
-                    ) 
+                    )
+
 
                     response["upload_code"] = upload_response.status_code
                     response["upload_response"] = upload_response.text[:2000]
@@ -615,14 +618,20 @@ def schedule_agent(data):
 
 def load_agent_config(name: str) -> AgentConfig:
     """Load agent configuration from database with enhanced field handling"""
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     try:
         logger.info("load_agent_config: fetching agent", extra={"agent_name": name})
-        resp = requests.get(API_URL, params={"AgentName": name}, timeout=REQUEST_TIMEOUT)
+        resp = session.get(API_URL, params={"AgentName": name}, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json().get("Table", [])
     except requests.exceptions.RequestException as e:
         logger.exception("Error fetching agent details")
         return None
+
 
     if not data:
         logger.warning("No agent data returned", extra={"agent_name": name})

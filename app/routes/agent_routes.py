@@ -21,6 +21,8 @@ from app.services.agent_servies import handle_agent_request
 import logging
 import math
 import numpy as np
+import ast
+import json
 
 logger = logging.getLogger("app.routes.agent_routes")
 from app.agents.autogen_orchestrator import run_autogen_orchestration
@@ -438,7 +440,9 @@ async def play_agent(name: str, request: Request):
 
     # Use official AutoGen orchestration for chat
     logger.info("play_agent: invoking AutoGen orchestration", extra={"agent_name": name, "user_id": user_id})
-    result = run_autogen_orchestration(message, agent_name=name)
+    created_by = data.get("created_by")
+    encrypted_filename = data.get("encrypted_filename")
+    result = run_autogen_orchestration(message, agent_name=name, created_by=created_by, encrypted_filename=encrypted_filename)
 
     agent_reply = result.get("answer") or "Sorry, no response generated."
     user_threads[user_id].append({"agent": agent_reply})
@@ -499,17 +503,23 @@ async def plan_and_run_manager(request: Request):
 @router.post("/agent/orchestrate")
 async def orchestrate_agents(request: Request):
     """Execute multi-agent workflow for a task"""
-    data = await request.json()
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        body = await request.body()
+        data = ast.literal_eval(body.decode())
     task = data.get("task")
     session_id = data.get("session_id", str(uuid4()))
 
     if not task:
         return JSONResponse({"error": "Task is required"}, status_code=400)
 
-    # Optional metadata to trigger automatic upload from orchestrator
-    output_format = data.get("output_format")
+    # Optional metadata for file upload
     created_by = data.get("created_by")
     encrypted_filename = data.get("encrypted_filename")
+
+    # Optional metadata
+    output_format = data.get("output_format")
 
     # Initialize agent manager
     manager = AgentManager()
@@ -535,10 +545,22 @@ async def orchestrate_agents(request: Request):
         if agent_name and agent_name not in agents_used:
             agents_used.append(agent_name)
 
+    # Extract table_data and file_upload_status from the last relevant step
+    table_data = None
+    file_upload_status = None
+    for step in reversed(steps):
+        res = step.get("result", {})
+        if res.get("preview_rows") and table_data is None:
+            table_data = res["preview_rows"]
+        if res.get("upload_status") and file_upload_status is None:
+            file_upload_status = res["upload_status"]
+
     return JSONResponse({
         "session_id": session_id,
         "task": task,
         "agents_used": agents_used,
+        "table_data": table_data,
+        "file_upload_status": file_upload_status,
         "result": safe_result
     })
 
