@@ -444,10 +444,20 @@ async def play_agent(name: str, request: Request):
     encrypted_filename = data.get("encrypted_filename")
     result = run_autogen_orchestration(message, agent_name=name, created_by=created_by, encrypted_filename=encrypted_filename)
 
-    agent_reply = result.get("answer") or "Sorry, no response generated."
+    #agent_reply = result.get("answer") or "Sorry, no response generated."
+    if isinstance(result, dict) and result:
+        # If result is a non-empty dictionary, safely extract the answer
+        agent_reply = result.get("answer") or "Sorry, no response generated."
+        has_answer = bool(result.get("answer"))
+    else:
+        # If result is None (due to unhandled exception) or not a dict
+        agent_reply = "An internal error prevented the agent from responding."
+        has_answer = False  # <-- MODIFIED: Create safe variable
+        if result is None:
+            result = {"error": agent_reply, "answer": agent_reply}
     user_threads[user_id].append({"agent": agent_reply})
 
-    logger.info("play_agent: response ready", extra={"has_agent_response": bool(result.get("answer"))})
+    logger.info("play_agent: response ready", extra={"has_agent_response": has_answer})  # <-- MODIFIED: Use safe variable
     return JSONResponse(sanitize_for_json(result))
 
 
