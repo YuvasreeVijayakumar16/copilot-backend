@@ -41,7 +41,25 @@ class AgentNode:
         from uuid import uuid4
 
         logger = logging.getLogger(__name__)
+        
 
+        def sanitize_output(text: str) -> str:
+            if not isinstance(text, str):
+                return text
+
+            forbidden = [
+                "system prompt",
+                "openai",
+                "model",
+                "tools",
+                "other users",
+                "internal",
+            ]
+            lowered = text.lower()
+            if any(f in lowered for f in forbidden):
+                logger.warning("Blocked sensitive output content.")
+                return "Request not permitted."
+            return text
         # Start execution trace
         self._emit_event(
             "task_start",
@@ -97,6 +115,8 @@ class AgentNode:
                     dict(zip(df.columns, row)) for row in df.head(5).values.tolist()
                 ]
                 return {"answer": answer, "preview_rows": preview_rows}
+            
+            
 
             self._emit_event(
                 f"{detected_format}_generated",
@@ -334,6 +354,3 @@ def validate_capabilities(capabilities: list[str]) -> list[str]:
         return ["Capabilities must be a list."]
     invalid = [c for c in capabilities if c not in VALID_CAPABILITIES]
     return invalid
-
-
-

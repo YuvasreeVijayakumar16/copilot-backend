@@ -1,3 +1,4 @@
+
 import uuid
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -221,10 +222,8 @@ def generate_excel(df: pd.DataFrame, question: str, include_charts: bool = False
     # Use the provided filename or create a fallback
     #output_filename = filename if filename else f"report_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
     if filename:
-        filename_stem_1, _ = os.path.splitext(filename)
-        # 2. Strip the second-to-last extension, resulting in the clean stem
-        final_stem, _ = os.path.splitext(filename_stem_1)
-        output_filename = f"{final_stem}.xlsx"
+        base_name = os.path.splitext(filename)[0]
+        output_filename = f"{base_name}.xlsx"
     else:
         output_filename = f"report_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.xlsx"
     excel_path = os.path.join(output_dir, output_filename)
@@ -273,12 +272,14 @@ def generate_word(df: pd.DataFrame, question: str, include_charts: bool = False,
     # Use the provided filename or create a fallback
     #output_filename = filename if filename else f"report_{datetime.now().strftime('%Y%m%d%H%M%S')}.docx"
     # Normalize filename to prevent double extensions
-    filename_stem_1, _ = os.path.splitext(filename)
-    if  filename: # 2. Strip the second-to-last extension, resulting in the clean stem
-            final_stem, _ = os.path.splitext(filename_stem_1)
-            output_filename = f"{final_stem}.docx"
+    
+    if filename:
+        # Strip extension safely to prevent double extensions
+        base_name = os.path.splitext(filename)[0]
+        output_filename = f"{base_name}.docx"
     else:
-            output_filename = f"report_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.docx"
+        # Fallback if no filename is provided
+        output_filename = f"report_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.docx"
     word_path = os.path.join(output_dir, output_filename)
     doc.save(word_path)
     
@@ -574,11 +575,8 @@ def generate_ppt_enhanced(question: str, df: pd.DataFrame, include_charts: bool 
     # Normalize filename to prevent double extensions
     
     if filename:
-        # 1. Strip the last extension
-        filename_stem_1, _ = os.path.splitext(filename)
-        # 2. Strip the second-to-last extension, resulting in the clean stem
-        final_stem, _ = os.path.splitext(filename_stem_1)
-        output_filename = f"{final_stem}.pptx"
+        base_name = os.path.splitext(filename)[0]
+        output_filename = f"{base_name}.pptx"
     else:
         output_filename = f"report_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.pptx"
         

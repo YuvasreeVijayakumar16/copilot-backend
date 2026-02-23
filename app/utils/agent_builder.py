@@ -1,26 +1,15 @@
 # === ✅ Validate if the agent role is supported
 VALID_ROLES = [
+    "Supplier Relationship Manager",
     "Supply Chain Planner",
     "Demand Planner",
     "Production Planner",
     "Supply Chain Analyst",
-    "Sales & Operations Planning (S&OP) Manager",
     "Inventory Planner",
     "Capacity Planning Specialist",
-    "Procurement Specialist / Buyer",
-    "Strategic Sourcing Manager",
-    "Category Manager",
-    "Supplier Relationship Manager",
-    "Contract & Compliance Manager",
-    "Vendor Development Executive",
-    "Global Sourcing Specialist",
-    "Supply Chain Data Analyst",
-    "ERP/SAP Supply Chain Consultant",
     "Forecasting Analyst",
-    "AI/ML Supply Chain Modeler",
-    "Digital Supply Chain Transformation Manager",
-    "Inventory Optimization Specialist"
-]
+    "Supply Chain Transformation Manager (admin)"
+   ]
 
 from openai import OpenAI
 import os

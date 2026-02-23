@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional, Callable
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 
-from app.services.agent_servies import load_agent_config, GET_ALL_AGENTS_URL
+from app.services.agent_servies import load_agent_config, GET_ALL_AGENTS_URL, GET_ALL_AGENTS_PARAMS
 from app.agents.agent_conversation import AgentNode, MessageBus, _client
 from app.utils.schema_reader import get_schema_and_sample_data
 from app.db.sql_connection import execute_sql_query
@@ -74,7 +74,7 @@ class AgentManager:
             for attempt in range(max_retries):
                 try:
                     logger.info(f"Attempting to fetch all agents from API: {GET_ALL_AGENTS_URL} (attempt {attempt + 1}/{max_retries})")
-                    resp = requests.get(GET_ALL_AGENTS_URL, timeout=30)
+                    resp = requests.get(GET_ALL_AGENTS_URL,params=GET_ALL_AGENTS_PARAMS, timeout=30)
                     resp.raise_for_status()
                     break  # Success, exit retry loop
                 except requests.exceptions.Timeout:
@@ -448,6 +448,26 @@ class AgentManager:
         df["Understock"] = df["Current_Stock"] < df["Reorder_Point"]
         logger.info("Created sample data", extra={"rows": len(df)})
         return df
+    def _sanitize_output(self, text: str) -> str:
+        if not text:
+            return text
+
+        blocked_patterns = [
+            "database schema",
+            "table:",
+            "columns:",
+            "create table",
+            "insert into",
+            "alter table",
+            "internal architecture",
+        ]
+
+        lowered = text.lower()
+
+        if any(p in lowered for p in blocked_patterns):
+            return "Request not permitted."
+
+        return text
 
     def plan_and_run(self, task: str, candidate_agents: Optional[List[str]] = None) -> Dict[str, Any]:
         plan = self.plan_from_task(task)
@@ -482,10 +502,11 @@ class AgentManager:
                 file_url = step_result["blob_url"]
                 break
         combined_results = self._combine_results_with_llm(task, steps, file_url)
+        safe_combined = self._sanitize_output(combined_results)
 
         return {
             "plan": plan,
             "steps": steps,
-            "combined_results": combined_results,
+            "combined_results": safe_combined,
             "file_url": file_url, # <--- The UI reads the download link from this key
         }

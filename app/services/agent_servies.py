@@ -46,7 +46,14 @@ REQUEST_TIMEOUT = 20
 MAX_QUESTION_LENGTH = 5000
 
 API_ROOT = "https://supplysenseaiapi-aadngxggarc0g6hz.z01.azurefd.net/api/iSCM/"
+#GET_ALL_AGENTS_URL = f"{API_ROOT}GetAgentdetails?logged_cuid=1218"
+
+
+
 GET_ALL_AGENTS_URL = f"{API_ROOT}GetAgentdetails"
+GET_ALL_AGENTS_PARAMS = {"logged_cuid": "1226"}
+
+
 EDIT_AGENT_URL = f"{API_ROOT}UpdateAgentDetails"
 API_URL = f"{API_ROOT}GetAgentDetails"
 PUBLISH_AGENT_URL = f"{API_ROOT}UpdateAgentDetails"
@@ -55,13 +62,22 @@ POST_SAVE_PPT_DETAILS_URL = f"{API_ROOT}PostSavePPTDetailsV2"
 UPDATE_PPT_FILE_URL = f"{API_ROOT}UpdatePptFileV2"
 
 # Guardrail patterns
+
+
 INJECTION_PATTERNS = [
     r"(?i)ignore (all|any|previous) (instructions|rules)",
     r"(?i)act as",
     r"(?i)system prompt",
     r"(?i)developer mode",
     r"(?i)jailbreak",
+    r"(?i)show.*conversation",
+    r"(?i)other users",
+    r"(?i)reveal.*prompt",
+    r"(?i)list.*tools",
+    r"(?i)override.*system",
+    r"(?i)provide.*model details"
 ]
+
 
 FORBIDDEN_SQL_KEYWORDS = [
     "insert", "update", "delete", "drop", "alter", "create", "truncate",
@@ -391,7 +407,8 @@ async def handle_agent_request(data: dict):
 
     # Compute file extension
     file_ext = {"ppt": "pptx", "excel": "xlsx", "word": "docx"}.get(output_format, "dat")
-    filename_with_ext = f"{encrypted_filename}.{file_ext}"
+    clean_filename = os.path.splitext(encrypted_filename)[0]
+    filename_with_ext = f"{clean_filename}.{file_ext}"
 
     # =============================
     # 5️⃣ Generate Content
@@ -555,12 +572,16 @@ async def test_agent_response(agent_config: AgentConfig, structured_schema, samp
 # Agent publish / schedule / edit / load helpers
 # ------------------------
 def publish_agent(agent_name: str):
+    API_URL = f"{API_ROOT}GetAgentdetails"   
+
+    params = {
+        "logged_cuid": "1226" }
     try:
         if not agent_name:
             return {"error": "Missing 'agent_name'"}
 
         logger.info("publish_agent: fetching all agents")
-        get_response = requests.get(GET_ALL_AGENTS_URL, timeout=REQUEST_TIMEOUT)
+        get_response = requests.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
         if get_response.status_code != 200:
             return {"error": f"Failed to fetch agents. Status code: {get_response.status_code}"}
 
@@ -640,6 +661,11 @@ def schedule_agent(data: dict):
 
 def load_agent_config(name: str) -> AgentConfig:
     """Load agent configuration from database with enhanced field handling"""
+
+    API_URL = f"{API_ROOT}GetAgentdetails"   
+
+    params = {
+        "logged_cuid": "1226" }
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retries)
@@ -647,7 +673,7 @@ def load_agent_config(name: str) -> AgentConfig:
     session.mount("http://", adapter)
     try:
         logger.info("load_agent_config: fetching agent", extra={"agent_name": name})
-        resp = session.get(API_URL, params={"AgentName": name}, timeout=REQUEST_TIMEOUT)
+        resp = session.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json().get("Table", [])
     except requests.exceptions.RequestException:
@@ -720,6 +746,11 @@ def list_to_str(value):
 
 
 def edit_agent_config(existing_name: str, new_data: dict):
+    
+    API_URL = f"{API_ROOT}GetAgentdetails"   
+
+    params = {
+        "logged_cuid": "1226" }
     try:
         new_name = new_data.get("name")
         new_role = new_data.get("role")
@@ -731,7 +762,7 @@ def edit_agent_config(existing_name: str, new_data: dict):
             return {"error": "Missing 'ExistingAgentName'"}
 
         # Step 1: Fetch agents
-        get_response = requests.get(GET_ALL_AGENTS_URL, timeout=REQUEST_TIMEOUT)
+        get_response = requests.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
         if get_response.status_code != 200:
             return {"error": f"Failed to fetch agents. Status code: {get_response.status_code}"}
 
