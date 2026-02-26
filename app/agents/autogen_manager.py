@@ -71,10 +71,19 @@ class AgentManager:
 
         try:
             max_retries = 3
+            headers = {
+                'Content-Type': 'application/json',
+                'X-User-Role': 'Admin',
+            }
             for attempt in range(max_retries):
                 try:
                     logger.info(f"Attempting to fetch all agents from API: {GET_ALL_AGENTS_URL} (attempt {attempt + 1}/{max_retries})")
-                    resp = requests.get(GET_ALL_AGENTS_URL,params=GET_ALL_AGENTS_PARAMS, timeout=30)
+                    resp = requests.get(
+                        GET_ALL_AGENTS_URL,
+                        params=GET_ALL_AGENTS_PARAMS,
+                        headers=headers,
+                        timeout=30
+                    )
                     resp.raise_for_status()
                     break  # Success, exit retry loop
                 except requests.exceptions.Timeout:

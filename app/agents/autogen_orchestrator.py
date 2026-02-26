@@ -101,6 +101,7 @@ def run_autogen_orchestration(
     
     max_retries = 3
     df_clean = pd.DataFrame()
+    df = None
     last_error = None
     sql_query = ""
     
@@ -175,9 +176,9 @@ def run_autogen_orchestration(
             logger.exception(f"Exception during SQL generation/execution (Attempt {attempt+1})")
             continue
 
-    if df.empty:
+    if df is None or df.empty:
         if last_error:
-             return {"error": f"Failed to retrieve data after retries. Last error: {last_error}"}
+            return {"error": f"Failed to retrieve data after retries. Last error: {last_error}"}
         return {"answer": "No data found for the query.", "sql": sql_query}
 
     # Clean data

@@ -576,12 +576,16 @@ def publish_agent(agent_name: str):
 
     params = {
         "logged_cuid": "1226" }
+    headers = {
+        'Content-Type': 'application/json',
+        'X-User-Role': 'Admin',
+    }
     try:
         if not agent_name:
             return {"error": "Missing 'agent_name'"}
 
         logger.info("publish_agent: fetching all agents")
-        get_response = requests.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
+        get_response = requests.get(API_URL, params=params, timeout=REQUEST_TIMEOUT, headers=headers)
         if get_response.status_code != 200:
             return {"error": f"Failed to fetch agents. Status code: {get_response.status_code}"}
 
@@ -666,6 +670,10 @@ def load_agent_config(name: str) -> AgentConfig:
 
     params = {
         "logged_cuid": "1226" }
+    headers = {
+        'Content-Type': 'application/json',
+        'X-User-Role': 'Admin',
+    }
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retries)
@@ -673,7 +681,7 @@ def load_agent_config(name: str) -> AgentConfig:
     session.mount("http://", adapter)
     try:
         logger.info("load_agent_config: fetching agent", extra={"agent_name": name})
-        resp = session.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
+        resp = session.get(API_URL, params=params, timeout=REQUEST_TIMEOUT, headers=headers)
         resp.raise_for_status()
         data = resp.json().get("Table", [])
     except requests.exceptions.RequestException:
@@ -751,6 +759,10 @@ def edit_agent_config(existing_name: str, new_data: dict):
 
     params = {
         "logged_cuid": "1226" }
+    headers = {
+        'Content-Type': 'application/json',
+        'X-User-Role': 'Admin',
+    }
     try:
         new_name = new_data.get("name")
         new_role = new_data.get("role")
@@ -762,7 +774,7 @@ def edit_agent_config(existing_name: str, new_data: dict):
             return {"error": "Missing 'ExistingAgentName'"}
 
         # Step 1: Fetch agents
-        get_response = requests.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
+        get_response = requests.get(API_URL, params=params, timeout=REQUEST_TIMEOUT, headers=headers)
         if get_response.status_code != 200:
             return {"error": f"Failed to fetch agents. Status code: {get_response.status_code}"}
 
