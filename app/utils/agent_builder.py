@@ -11,18 +11,14 @@ VALID_ROLES = [
     "Supply Chain Transformation Manager (admin)"
    ]
 
-from openai import OpenAI
+from openai import AzureOpenAI
 import os
+from app.utils.openai_client import get_openai_client
 import time
 import json
 
-_openai_client = None
-
-def _get_client() -> OpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    return _openai_client
+def _get_client() -> AzureOpenAI:
+    return get_openai_client()
 
 # Simple in-memory TTL cache for generated prompts: {(purpose, role): (expiry_ts, prompts)}
 _prompts_cache: dict = {}

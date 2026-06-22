@@ -1,4 +1,3 @@
-
 import uuid
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -8,7 +7,7 @@ from datetime import datetime
 import os
 import pandas as pd
 from docx import Document
-from openai import OpenAI
+from openai import AzureOpenAI
 import re
 import matplotlib.pyplot as plt
 
@@ -20,21 +19,29 @@ from pptx.enum.text import PP_ALIGN
 import numpy as np
 import textwrap
 
-# === ✅ Initialize OpenAI
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# === ✅ Use shared singleton client (correct deployment, correct api_version)
+from app.utils.openai_client import get_openai_client, get_openai_model
+def _client():
+    return get_openai_client()
+def _model():
+    return get_openai_model()
 
 # === ✅ Generate GPT Insights and Recommendations
 def generate_insights(df: pd.DataFrame):
     prompt = f"Analyze this data and provide 3–5 business insights and 2–3 strong recommendations:\n\n{df.head(10).to_string(index=False)}"
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    response = _client().chat.completions.create(
+        model=_model(),
         messages=[
             {"role": "system", "content": "You are a data analyst generating insights for supply chain decision makers."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
     )
-    output = response.choices[0].message.content.strip()
+    # ✅ FIX: guard against content_filter / None content
+    choice = response.choices[0] if response and response.choices else None
+    if choice is None or getattr(choice.message, "content", None) is None:
+        return "No insights available (model returned no content).", ""
+    output = choice.message.content.strip()
 
     # Cleanup: remove markdown styling and numbered bullets
     output = re.sub(r"\*\*(.*?)\*\*", r"\1", output)
@@ -287,15 +294,16 @@ def generate_word(df: pd.DataFrame, question: str, include_charts: bool = False,
 
 def generate_direct_response(question: str, df: pd.DataFrame) -> str:
     prompt = f"Answer the following question based on the data provided:\n\nQuestion: {question}\n\nData:\n{df.head(10).to_string(index=False)}"
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    response = _client().chat.completions.create(
+        model=_model(),  # ✅ FIX: was hardcoded "gpt-4o"
         messages=[
             {"role": "system", "content": "You are a helpful assistant providing direct answers based on data."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
     )
-    return response.choices[0].message.content.strip()
+    content = getattr(response.choices[0].message, "content", None) if response and response.choices else None
+    return content.strip() if content else "No response available."
 
 # ========================== ENHANCED, PROFESSIONAL PPT GENERATOR ==========================
 def generate_ppt_enhanced(question: str, df: pd.DataFrame, include_charts: bool = True, filename: str = None):
@@ -339,8 +347,8 @@ def generate_ppt_enhanced(question: str, df: pd.DataFrame, include_charts: bool 
     # --- Helper: GPT short summarizer for title ---
     def summarize_title(text):
         try:
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+            resp = _client().chat.completions.create(
+                model=_model(),  # ✅ FIX: was "gpt-4o-mini"
                 messages=[
                     {"role": "system", "content": "You create short, professional titles for PowerPoint reports."},
                     {"role": "user", "content": f"Summarize this in max 8 words for a PowerPoint title: {text}"}
@@ -356,8 +364,8 @@ def generate_ppt_enhanced(question: str, df: pd.DataFrame, include_charts: bool 
         if not text or len(text.strip()) == 0:
             return "No insights available."
         try:
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+            resp = _client().chat.completions.create(
+                model=_model(),  # ✅ FIX: was "gpt-4o-mini"
                 messages=[
                     {"role": "system", "content": "You summarize analytical text into clear, concise business bullet points for PowerPoint slides."},
                     {"role": "user", "content": f"Convert the following into {max_bullets} concise bullet points:\n{text}"}

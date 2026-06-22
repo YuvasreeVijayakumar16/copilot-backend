@@ -8,10 +8,12 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 
 from app.services.agent_servies import load_agent_config, GET_ALL_AGENTS_URL, GET_ALL_AGENTS_PARAMS
-from app.agents.agent_conversation import AgentNode, MessageBus, _client
+from app.agents.agent_conversation import AgentNode, MessageBus
+from app.utils.openai_client import get_openai_client, get_openai_model  # ✅ FIX: shared singleton + correct deployment
 from app.utils.schema_reader import get_schema_and_sample_data
 from app.db.sql_connection import execute_sql_query
 from app.utils.ppt_generator import generate_direct_response
+from app.utils.prompt_logger import log_prompt_to_blob
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -24,7 +26,6 @@ class AgentManager:
 
     def __init__(self):
         self.bus = MessageBus()
-        # Scalability: thread pool allowed for limited parallelism; env var controls size
         self._executor = ThreadPoolExecutor(max_workers=int(os.getenv("AGENT_MAX_WORKERS", "4")))
 
     def _is_simple_task(self, task: str) -> bool:
@@ -38,13 +39,11 @@ class AgentManager:
                 res = agent.execute(task, context)
                 if isinstance(res, dict) and res.get("error"):
                     last_exc = res.get("error")
-                    # Robustness: agent returned an error; record and retry according to policy.
                     logger.warning("Agent returned error", extra={"agent": agent.name, "error": res.get("error")})
                     continue
                 return res
             except Exception as e:
                 last_exc = str(e)
-                # Fault tolerance: log and apply a small backoff before retrying
                 logger.exception("Execution exception", extra={"agent": agent.name, "attempt": attempt})
                 time.sleep(0.5 * attempt)
 
@@ -55,7 +54,6 @@ class AgentManager:
         for cfg in configs:
             name = cfg.get("name") or cfg.get("Name")
             purpose = cfg.get("purpose") or cfg.get("Purpose") or ""
-            # Modularity: wrap raw config into AgentNode instances
             nodes.append(AgentNode(name=name, purpose=purpose, config=cfg))
         return nodes
 
@@ -85,14 +83,14 @@ class AgentManager:
                         timeout=30
                     )
                     resp.raise_for_status()
-                    break  # Success, exit retry loop
+                    break  
                 except requests.exceptions.Timeout:
                     if attempt < max_retries - 1:
                         sleep_time = 5 * (attempt + 1)
                         logger.warning(f"Timeout fetching agents, retrying in {sleep_time} seconds", extra={"attempt": attempt + 1})
                         time.sleep(sleep_time)
                     else:
-                        raise  # Re-raise after last attempt
+                        raise  
 
             table = resp.json().get("Table", [])
             if not table:
@@ -108,7 +106,6 @@ class AgentManager:
                 else:
                     logger.warning(f"Failed to load config for agent: {name}")
 
-            # Convert configs to AgentNode (encapsulation + prepare for health/auth checks)
             nodes = self._agents_from_configs(configs)
             self._agents_cache = nodes
             self._agents_cache_time = now
@@ -134,9 +131,6 @@ class AgentManager:
             logger.warning("Routing failed: No agents provided to router")
             return None
 
-    # Coordination & Cooperation: heuristic routing tries to find an agent whose
-    # purpose words overlap with the task. This is a lightweight task allocation
-    # strategy. If ambiguous, fallback to LLM routing (adaptability + goal-oriented).
         task_lower = task.lower()
         best = None
         best_score = 0
@@ -146,8 +140,6 @@ class AgentManager:
                 for token in a.purpose.lower().split():
                     if token in task_lower:
                         score += 1
-            # small bias if agent is healthy
-            # Robustness: prefer healthy agents slightly
             if a.health_check():
                 score += 0.1
             if score > best_score:
@@ -158,20 +150,25 @@ class AgentManager:
             logger.info("Heuristic routing selected agent", extra={"agent": best.name, "score": best_score})
             return best
 
-        # Fallback to LLM-based routing for ambiguous cases
         try:
             agent_descriptions = "\n".join([f"- {a.name}: {a.purpose}" for a in agents])
             prompt = (
                 f"You are a routing assistant. Choose the best agent by name from the list below for the task. Respond with only the agent name.\n\n"
                 f"Agents:\n{agent_descriptions}\n\nTask: {task}"
             )
-            # Adaptability: use LLM to help select an agent for ambiguous tasks
-            resp = _client.chat.completions.create(
-                model=os.getenv("AUTOGEN_MODEL", "gpt-4o-mini"),
+            resp = get_openai_client().chat.completions.create(
+                model=get_openai_model(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
             )
             chosen_name = (resp.choices[0].message.content or "").strip().replace('"', '')
+            log_prompt_to_blob(
+                source="AgentManager.route",
+                model=get_openai_model(),
+                messages=[{"role": "user", "content": prompt}],
+                metadata={"agent_count": len(agents), "task": task},
+                response_text=chosen_name,
+            )
             for a in agents:
                 if a.name and a.name.strip().lower() == chosen_name.lower():
                     logger.info("LLM routing selected agent", extra={"agent": a.name})
@@ -183,53 +180,39 @@ class AgentManager:
         return agents[0]
 
     def _run_single(self, task: str, agent: AgentNode, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        # Decouple actual execution via AgentNode and provide retries
         return self._execute_with_retries(agent, task, context=context, retries=int(os.getenv("AGENT_RETRIES", "2")))
 
     def _maybe_evaluate(self, result: Dict[str, Any], criteria: Optional[str]) -> bool:
         if not criteria:
             return True
-        # Placeholder for evaluation logic; always True for now
         return True
 
-    # 🎯 FIX 3: Update function signature to accept file_url
     def _combine_results_with_llm(self, task: str, steps: List[Dict[str, Any]], file_url: Optional[str] = None) -> str:
-        """Use LLM to combine and summarize results from all agent steps."""
-
         if not steps:
             return "No results to combine."
 
-        # 🎯 FIX 4: Find the most important data from the last step
-        final_result_data = {}
         insights = ""
         recommendations = ""
 
-        # Loop backwards to find the last step that has insights
         for step in reversed(steps):
             result = step.get("result", {})
             if "error" not in result:
-                # Prioritize results from the 'autogen_orchestrator.py' structure
                 if "insights" in result and "recommendations" in result:
                     insights = result.get("insights", "")
                     recommendations = result.get("recommendations", "")
-                    break # Found the best data
+                    break 
                 
-                # Fallback for 'agent_conversation.py' structure
                 if not insights and "answer" in result:
-                    # Use the 'answer' field, but skip if it's just a file link
                     answer_text = result.get("answer", "")
                     if "Generated PPT" not in answer_text and "Download Report" not in answer_text:
-                        insights = answer_text # Use this as the main insight
+                        insights = answer_text 
 
-            if insights: # Stop if we found any useful text
+            if insights: 
                 break
         
-        # If insights is still empty, grab the last answer
         if not insights and steps:
             insights = steps[-1].get("result", {}).get("answer", "No insights generated.")
 
-
-        # 🎯 FIX 5: Create a new, high-quality prompt for a business report.
         prompt = (
             f"You are a business analyst. Your goal is to write a final, human-readable executive summary in Markdown for a business user.\n"
             f"The user's original request was: '{task}'\n\n"
@@ -248,15 +231,21 @@ class AgentManager:
         )
 
         try:
-            resp = _client.chat.completions.create(
-                model=os.getenv("AUTOGEN_MODEL", "gpt-4o-mini"),
+            resp = get_openai_client().chat.completions.create(
+                model=get_openai_model(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
             )
             combined = (resp.choices[0].message.content or "").strip()
+            log_prompt_to_blob(
+                source="AgentManager._combine_results_with_llm",
+                model=get_openai_model(),
+                messages=[{"role": "user", "content": prompt}],
+                metadata={"task": task, "step_count": len(steps), "file_url": file_url},
+                response_text=combined,
+            )
             logger.info("Combined results generated by LLM")
 
-            # Final check to ensure the file link is present if it was provided
             if file_url and file_url not in combined:
                 combined += f"\n\nYou can download the full report here: [Download Report]({file_url})"
             
@@ -276,11 +265,7 @@ class AgentManager:
 
         logger.info(f"Discovered {len(agents)} agents for workflow execution: {[a.name for a in agents]}")
 
-        # Use provided initial context if present so callers can seed values like
-        # output_format, created_by, and encrypted_filename that should be
-        # forwarded into agent execution and ultimately into the orchestrator.
         ctx: Dict[str, Any] = context or {}
-
         results: List[Dict[str, Any]] = []
 
         for idx, step in enumerate(plan, start=1):
@@ -296,20 +281,16 @@ class AgentManager:
             except KeyError as e:
                     missing_key = str(e).strip("'")
                     logger.warning(f"Context key '{missing_key}' missing — using unformatted task text instead.")
-                    # fallback to original task text and proceed safely
                     task = original_task
             except Exception as e:
                     logger.warning(f"Task formatting failed ({e}); using original string.")
                     task = original_task
 
-
-            # Coordination: route each step to a chosen agent and execute
             agent = self.route(task, agents)
             if not agent:
                 results.append({"agent": "N/A", "task": task, "result": {"error": "Routing failed"}})
                 continue
 
-            # If the step can be done in parallel and marked as such, support parallel execution (simple pattern)
             try:
                 r = self._run_single(task, agent, ctx)
             except Exception as e:
@@ -319,14 +300,11 @@ class AgentManager:
             step_result = {"agent": agent.name, "task": task, "result": r}
             results.append(step_result)
 
-            # publish the result for interested subscribers (Communication Protocols)
             try:
                 self.bus.publish(f"agent.{agent.name}.result", step_result)
             except Exception:
                 logger.exception("Failed to publish result to bus")
 
-            # Environment Awareness & Goal-Oriented Behavior:
-            # update context with step outputs to feed subsequent steps
             res = step_result.get("result") or {}
             if "error" not in res and res.get("answer"):
                 output_key = step.get("output_key", f"answer_{idx}")
@@ -338,7 +316,7 @@ class AgentManager:
     def plan_from_task(self, task: str) -> List[Dict[str, Any]]:
         default = [{"task": task.strip(), "output_key": "answer"}]
         try:
-            model = os.getenv("AUTOGEN_MODEL", "gpt-4o-mini")
+            model = get_openai_model()
             logger.info("Generating task plan from GPT", extra={"task": task, "model": model})
             prompt = (
                 "You are an intelligent assistant that creates a JSON plan to solve a user's task. "
@@ -352,15 +330,19 @@ class AgentManager:
                 "Now, generate the plan for this task:\n"
                 f"Task: {task}"
             )
-            # Adaptability & Goal-Oriented Behavior: use LLM to decompose the user's
-            # task into a small sequential plan with explicit output_keys to enable
-            # goal-directed multi-step execution.
-            resp = _client.chat.completions.create(
+            resp = get_openai_client().chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
             )
             txt = (resp.choices[0].message.content or "").strip()
+            log_prompt_to_blob(
+                source="AgentManager.plan_from_task",
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                metadata={"task": task},
+                response_text=txt,
+            )
             logger.info("Raw plan response from GPT", extra={"response": txt})
             if not txt:
                 logger.warning("Empty plan returned by GPT. Falling back to default plan.")
@@ -380,14 +362,22 @@ class AgentManager:
         """Fetch relevant data for the task using SQL query generation."""
         try:
             structured_schema, schema_text, sample_data = get_schema_and_sample_data()
+        except RuntimeError as e:
+            # ✅ FIX: DB credential/connection errors were silently swallowed before,
+            # producing an empty schema → empty SQL → empty DataFrame with no clue why.
+            logger.error(f"Cannot fetch schema — aborting data fetch: {e}")
+            print(f"❌ DEBUG: SCHEMA FETCH FAILED: {e}")
+            return pd.DataFrame()
+
+        try:
             logger.info("Available tables", extra={"tables": list(structured_schema.keys())})
             if not structured_schema:
-                logger.warning("No schema available for data fetching")
+                logger.error(
+                    "Schema is empty. Check DB credentials: SERVER, DATABASE, UID, PWD must all be set in .env"
+                )
+                print("❌ DEBUG: structured_schema is empty — check DB credentials in .env (PWD is commonly missing)")
                 return pd.DataFrame()
 
-            # ---------------------------------------------------------
-            # 🛑 FIX: Updated Prompt to enforce MS SQL Server Syntax
-            # ---------------------------------------------------------
             prompt = (
                 f"Generate a Microsoft SQL Server (T-SQL) query to analyze the task: '{task}'\n\n"
                 f"Database schema (table(columns)):\n{schema_text}\n\n"
@@ -403,16 +393,21 @@ class AgentManager:
                 "Return only the valid SQL query without any explanations, markdown, or code blocks."
             )
             
-            resp = _client.chat.completions.create(
-                model=os.getenv("AUTOGEN_MODEL", "gpt-4o-mini"),
+            resp = get_openai_client().chat.completions.create(
+                model=get_openai_model(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
             )
             sql_query = (resp.choices[0].message.content or "").strip()
-            # Clean up the query
+            log_prompt_to_blob(
+                source="AgentManager._fetch_data_for_task",
+                model=get_openai_model(),
+                messages=[{"role": "user", "content": prompt}],
+                metadata={"task": task},
+                response_text=sql_query,
+            )
             sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
             
-            # Debug prints
             print(f"\n{'='*40}")
             print(f"🔎 DEBUG: GENERATED SQL QUERY:\n{sql_query}")
             print(f"{'='*40}\n")
@@ -421,7 +416,6 @@ class AgentManager:
             if not sql_query:
                 return pd.DataFrame()
 
-            # Execute the query
             result = execute_sql_query(sql_query)
             if isinstance(result, dict) and "error" in result:
                 print(f"❌ DEBUG: SQL ERROR: {result['error']}")
@@ -457,6 +451,7 @@ class AgentManager:
         df["Understock"] = df["Current_Stock"] < df["Reorder_Point"]
         logger.info("Created sample data", extra={"rows": len(df)})
         return df
+
     def _sanitize_output(self, text: str) -> str:
         if not text:
             return text
@@ -470,25 +465,17 @@ class AgentManager:
             "alter table",
             "internal architecture",
         ]
-
         lowered = text.lower()
-
         if any(p in lowered for p in blocked_patterns):
             return "Request not permitted."
-
         return text
 
     def plan_and_run(self, task: str, candidate_agents: Optional[List[str]] = None) -> Dict[str, Any]:
         plan = self.plan_from_task(task)
         logger.info("Plan from GPT", extra={"plan": plan})
 
-        # Fetch data for the task
         df_clean = self._fetch_data_for_task(task)
 
-        # Allow callers to pass an initial context via the candidate_agents slot
-        # if they provided a dict there (backwards-compatible: most callers
-        # pass a list or None). If candidate_agents is a dict, treat it as
-        # context. Otherwise interpret as agent whitelist.
         context = {"df_clean": df_clean}
         agents_param = candidate_agents
         if isinstance(candidate_agents, dict):
@@ -497,13 +484,10 @@ class AgentManager:
 
         result = self.run_workflow(plan, agents_param, context)
 
-        # Combine results from all agents into a summary
         steps = result.get("steps", [])
-        #combined_results = self._combine_results_with_llm(task, steps)
         file_url = None
         for step in reversed(steps):
              step_result = step.get("result", {})
-             # Check for 'file_url' first, then 'blob_url'
              if step_result.get("file_url"):
                 file_url = step_result["file_url"]
                 break
@@ -517,5 +501,5 @@ class AgentManager:
             "plan": plan,
             "steps": steps,
             "combined_results": safe_combined,
-            "file_url": file_url, # <--- The UI reads the download link from this key
+            "file_url": file_url, 
         }

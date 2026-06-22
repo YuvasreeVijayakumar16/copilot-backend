@@ -1,10 +1,10 @@
-from openai import OpenAI
+from app.utils.openai_client import get_openai_client
 from app.utils.llm_validator import validate_purpose_and_instructions
 from app.utils.agent_builder import VALID_ROLES, generate_sample_prompts
 from uuid import uuid4
 from urllib.parse import urlparse # 🎯 NEW LINE
 
-client = OpenAI()
+client = get_openai_client()
 
 # ==============================
 # 🔹 AGENT NODE CLASS

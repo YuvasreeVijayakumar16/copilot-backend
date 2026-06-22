@@ -1,13 +1,13 @@
 from app.utils.query_generator import generate_sql_with_openai
 import os
-from openai import OpenAI, OpenAIError
+from app.utils.openai_client import get_openai_client, get_openai_model
 import json
 import asyncio
 import logging
 
 logger = logging.getLogger("app.utils.gpt_utils")
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = get_openai_client()
 
 def generate_sql_query(question, schema, system_prompt=None):
     logger.info("generate_sql_query: start", extra={
@@ -37,7 +37,7 @@ async def  is_question_relevant_to_purpose(question: str, purpose: str) -> bool:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=get_openai_model(),
             messages=[
                 {"role": "system", "content": "You are a relevance checker."},
                 {"role": "user", "content": prompt}

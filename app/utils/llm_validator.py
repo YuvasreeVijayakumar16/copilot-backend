@@ -1,9 +1,14 @@
 import json
 import re
 import os
-from openai import OpenAI, OpenAIError
+from openai import AzureOpenAI, OpenAIError
+from app.utils.openai_client import get_openai_model
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AzureOpenAI(
+    api_key=os.getenv("CLOUD_PROVIDER_OPENAI_API_KEY"),
+    api_version="2024-12-01-preview",
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+)
 
 def validate_purpose_and_instructions(purpose, instructions, structured_schema, sample_data):
     system_validator_prompt = """You are an AI assistant designed to validate user requests for a database query agent. Your sole purpose is to determine if a given 'purpose' and 'instructions' are valid and feasible based on a provided database schema and sample data.
@@ -52,7 +57,7 @@ Return JSON:
     try:
         # Send request to OpenAI
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=get_openai_model(),
             messages=[
                 {"role": "system", "content": system_validator_prompt},
                 {"role": "user", "content": prompt},
